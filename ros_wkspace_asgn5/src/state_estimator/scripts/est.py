@@ -1,0 +1,152 @@
+#!/usr/bin/env python
+
+# Columbia Engineering
+# MECS 4602 - Fall 2018
+
+import math
+import numpy
+import time
+import copy
+
+import rospy
+
+from state_estimator.msg import RobotPose
+from state_estimator.msg import SensorData
+
+class Estimator(object):
+    def __init__(self):
+
+        # Publisher to publish state estimate
+        self.pub_est = rospy.Publisher("/robot_pose_estimate", RobotPose, queue_size=1)
+
+        # Initial estimates for the state and the covariance matrix
+        self.x = numpy.zeros(3)
+        self.P = numpy.zeros((3,3))
+
+        # Covariance matrix for process (model) noise
+        self.V = numpy.zeros((3,3))
+        self.V[0,0] = 0.0025
+        self.V[1,1] = 0.0025
+        self.V[2,2] = 0.005
+
+        self.step_size = 0.01
+
+        # Subscribe to command input and sensory output of robot
+        rospy.Subscriber("/sensor_data", SensorData, self.sensor_callback)
+        
+    # This function gets called every time the robot publishes its control 
+    # input and sensory output. You must make use of what you know about 
+    # extended Kalman filters to come up with an estimate of the current
+    # state of the robot and covariance matrix.
+    # The SensorData message contains fields 'vel_trans' and 'vel_ang' for
+    # the commanded translational and rotational velocity respectively. 
+    # Furthermore, it contains a list 'readings' of the landmarks the
+    # robot can currently observe
+    def estimate(self, sens):
+
+        #### ----- YOUR CODE GOES HERE ----- ####
+
+	# get data from msg
+	t = self.step_size
+	v = sens.vel_trans
+	omega = sens.vel_ang
+
+	# x(k+1) prediction
+	x_pre = self.x[0] + t * v * numpy.cos(self.x[2])
+	y_pre = self.x[1] + t * v * numpy.sin(self.x[2])
+	theta_pre = self.x[2] + t * omega
+	x_hat = [x_pre, y_pre, theta_pre]
+	#print(self.x[0])
+
+	x_l = []
+	y_l = []
+	ss = copy.copy(sens.readings)
+	a = 0
+	for i in range(len(sens.readings)):
+		# get sensor data
+		x_l.append(ss[i].landmark.x)
+		y_l.append(ss[i].landmark.y)
+		if numpy.sqrt((x_pre - x_l[a])**2+(y_pre - y_l[a])**2) < 0.1:
+		    del sens.readings[i]
+		    del x_l[i]
+		    del y_l[i]
+		    a = a - 1
+		a = a + 1
+	
+	if len(sens.readings) >= 0:
+	    distance = []
+	    bearing = []
+	    #x_l = []
+	    #y_l = []
+	    H = numpy.empty((2*len(sens.readings), 3))
+	    y = []
+	    y_hat = numpy.empty(2*len(sens.readings))
+	    W = numpy.zeros((2*len(sens.readings), 2*len(sens.readings)))
+	    for i in range(len(sens.readings)):
+		# get sensor data
+		distance.append(sens.readings[i].range)
+		bearing.append(sens.readings[i].bearing)
+		#x_l.append(sens.readings[i].landmark.x)
+		#y_l.append(sens.readings[i].landmark.y)
+
+		#if numpy.sqrt((x_pre - x_l[i])**2+(y_pre - y_l[i])**2) < 0.1:
+		 #   continue
+
+		# calculate H(k+1)
+		y.append(sens.readings[i].range)
+		y.append(sens.readings[i].bearing) 
+	
+		#print(x_pre)
+		#print("ooooooo")
+		H[2*i][0] = (x_pre - x_l[i]) / numpy.sqrt((x_pre - x_l[i])**2+(y_pre - y_l[i])**2)
+		H[2*i][1] = (y_pre - y_l[i]) / numpy.sqrt((x_pre - x_l[i])**2+(y_pre - y_l[i])**2)
+		H[2*i][2] = 0
+		H[2*i+1][0] = (-y_pre + y_l[i]) / ((x_pre - x_l[i])**2 + (y_pre - y_l[i])**2)
+		H[2*i+1][1] = (x_pre - x_l[i]) / ((x_pre - x_l[i])**2 + (y_pre - y_l[i])**2)
+		H[2*i+1][2] = -1
+		W[2*i][2*i] = 0.1
+		W[2*i+1][2*i+1] = 0.05
+		
+		y_hat[2*i] = numpy.sqrt((x_pre-x_l[i])*(x_pre-x_l[i]) + (y_pre-y_l[i])*(y_pre-y_l[i]))
+		y_hat[2*i+1] = math.atan2(y_l[i]-y_pre, x_l[i]-x_pre) - theta_pre
+		
+	    # extented kalman filter 
+	    F = [[1, 0, -t*v*numpy.sin(self.x[2])], [0, 1, t*v*numpy.cos(self.x[2])], [0, 0, 1]]
+	    P_pre = numpy.dot(numpy.dot(F, self.P), numpy.transpose(F)) + self.V
+	    nu = numpy.array(y) - numpy.array(y_hat)
+	    # control nu less than pi
+	    for i in range(len(sens.readings)):
+		while nu[2*i+1] > numpy.pi:
+		    nu[2*i+1] -= 2*numpy.pi
+		while nu[2*i+1] < -numpy.pi:
+		    nu[2*i+1] += 2*numpy.pi
+	    #print(nu)
+	    #print("------")
+	    S = numpy.dot(numpy.dot(H, P_pre), numpy.transpose(H)) + W
+	    R = numpy.dot(numpy.dot(P_pre, numpy.transpose(H)), numpy.linalg.inv(S))
+	    self.x = x_hat + numpy.dot(R, nu)
+	    self.P = P_pre - numpy.dot(numpy.dot(R, H), P_pre)
+
+	else:
+	    self.x = x_hat
+	    #self.P = 
+	    
+	    
+	print(self.x)
+        #### ----- YOUR CODE GOES HERE ----- ####
+    
+    def sensor_callback(self,sens):
+
+        # Publish state estimate 
+        self.estimate(sens)
+        est_msg = RobotPose()
+        est_msg.header.stamp = sens.header.stamp
+        est_msg.pose.x = self.x[0]
+        est_msg.pose.y = self.x[1]
+        est_msg.pose.theta = self.x[2]
+        self.pub_est.publish(est_msg)
+
+if __name__ == '__main__':
+    rospy.init_node('state_estimator', anonymous=True)
+    est = Estimator()
+    rospy.spin()
